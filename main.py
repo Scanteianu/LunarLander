@@ -17,7 +17,7 @@ global landerControls
 
 class LanderProperties:
     def __init__(self):
-        self.burnrate = 8
+        self.burnrate = 15
         self.landingSpeed=2
         self.rollRate=180 #comparable to a fighter jet which ranges from 120 to 360
         # fuel and mass similar to descent stage
@@ -28,24 +28,25 @@ class LanderProperties:
         # should probably have about 2k lbs of fuel or about 1 ton https://en.wikipedia.org/wiki/Hard_landing#:~:text=Landing%20is%20the%20final%20phase,classed%20by%20crew%20as%20hard.
         # this is because apollo 11 landed with about 1k lbs aka 500kg and 45 sec left
         # estimated burn rate - 770 lbs in 45 sec is about 1k per min, round down to 900
-        # 900 per min is about 15 per second, which is about 8 kg
+        # 900 per min is about 15 per second, which is about 8 kg, at 60 pct thrust
         self.maxthrust = 45000 #https://en.wikipedia.org/wiki/Descent_propulsion_system
 class LanderStatus:
     # all fields in this class are in SI units
     # meters, seconds, and degrees (not radians) are used
     def __init__(self):
-        self.reset(0)
-    def reset(self, xvelocity):
+        self.reset()
+    def reset(self):
         self.xposition=0
         self.yposition=0
-        self.xvelocity=xvelocity
+        self.xvelocity=5 #seems Reasonable
         self.yvelocity=15 #https://space.stackexchange.com/questions/40902/apollo-altitude-vs-rate-of-descent-schedule
         #36fps == 10 mps at 1k ft, 30 mps at 3k ft, so at 450m, which is 1.5*300m, 15 mps
         self.angle=0
         #drymass is ascent total mass plus descent phase mass minus descent phase fuel (2000)
         self.drymass=2000+4700
-        self.fuelmass=2000
+        self.fuelmass=1000
         self.startingfuelmass=2000
+        self.altitude=-9
 
     def getMass(self):
         return self.drymass+self.fuelmass
@@ -73,10 +74,15 @@ class PhysicsSim:
         # force is mass times acceleration
         #acceleration is therefore force/mass
         #force =
-        landerStatus.yvelocity-=((landerProperties.maxthrust*landerControls.thrust*math.cos(math.radians(landerStatus.angle)))/landerStatus.getMass())*timeDelta
-
-        #updateFuelMass
-        landerStatus.fuelmass -= timeDelta*landerProperties.burnrate
+        acquired = landerControls.lock.acquire(timeout=0.1)
+        if acquired:
+            landerStatus.angle=landerControls.targetAngle #roll rate even of 25 degrees per second, unlikely
+            #simplify for now to just instantly change angle
+            landerStatus.yvelocity-=((landerProperties.maxthrust*landerControls.thrust*math.cos(math.radians(landerStatus.angle)))/landerStatus.getMass())*timeDelta
+            landerStatus.xvelocity-=((landerProperties.maxthrust*landerControls.thrust*math.sin(math.radians(landerStatus.angle)))/landerStatus.getMass())*timeDelta
+            #updateFuelMass
+            landerStatus.fuelmass -= timeDelta*landerProperties.burnrate*landerControls.thrust
+            landerControls.lock.release()
 
     def updateLanderStatusDueToPhysics(self,landerProperties, landerStatus, timeDelta):
         #update lander's accel
@@ -87,16 +93,34 @@ class PhysicsSim:
 
 def throttleUp(event):
     global landerControls
-    landerControls.lock.acquire()
-    if landerControls.thrust <1.0:
-        landerControls.thrust+=0.05
-    landerControls.lock.release()
+    acquired = landerControls.lock.acquire(timeout=0.1)
+    if acquired:
+        if landerControls.thrust <0.6:
+            landerControls.thrust+=0.05
+        if landerControls.thrust > 0.6:
+            landerControls.thrust=0.6
+        landerControls.lock.release()
 def throttleDown(event):
     global landerControls
-    landerControls.lock.acquire()
-    if landerControls.thrust >0.0:
-        landerControls.thrust-=0.05
-    landerControls.lock.release()
+    acquired = landerControls.lock.acquire(timeout=0.1)
+    if acquired:
+        if landerControls.thrust >0.1:
+            landerControls.thrust-=0.05
+        if landerControls.thrust < 0.1:
+            landerControls.thrust=0.1
+        landerControls.lock.release()
+def turnLeft(event):
+    global landerControls
+    acquired = landerControls.lock.acquire(timeout=0.1)
+    if acquired:
+        landerControls.targetAngle+=5
+        landerControls.lock.release()
+def turnRight(event):
+    global landerControls
+    acquired = landerControls.lock.acquire(timeout=0.1)
+    if acquired:
+        landerControls.targetAngle-=5
+        landerControls.lock.release()
 def setUpScreen():
     global canvasWidth
     global canvasHeight
@@ -119,6 +143,8 @@ def setUpScreen():
     #landerImg.show()
     window.bind('<Up>', throttleUp)
     window.bind('<Down>', throttleDown)
+    window.bind('<Left>', turnLeft)
+    window.bind('<Right>', turnRight)
     xposition = 0
     yposition = 0
     return window, canvas, throttle, infoLabel
@@ -129,7 +155,8 @@ def checkLanderInBounds(landerStatus):
     global canvasHeight
     global pixelsPerMeter
     return landerStatus.xposition*pixelsPerMeter<canvasWidth-landerWidth and \
-     landerStatus.yposition*pixelsPerMeter<=canvasHeight-landerHeight
+     landerStatus.xposition>0 and \
+     landerStatus.yposition*pixelsPerMeter<canvasHeight-landerHeight
 def checkFuel(landerStatus):
     return landerStatus.fuelmass>0
 def checkSafeLanding(landerStatus, landerProperties):
@@ -140,9 +167,9 @@ def checkSafeLanding(landerStatus, landerProperties):
         global pixelsPerMeter
         return landerStatus.xposition*pixelsPerMeter<=canvasWidth-landerWidth and \
             landerStatus.xposition>=0 and \
-            landerStatus.yposition*pixelsPerMeter<=canvasHeight-landerHeight and \
-            math.abs(landerStatus.angle)<20 and \
-            landerStatus.xvelocity < landerProperties.landingSpeed and \
+            landerStatus.yposition*pixelsPerMeter>=canvasHeight-landerHeight and \
+            abs(landerStatus.angle)<20 and \
+            abs(landerStatus.xvelocity) < landerProperties.landingSpeed and \
             landerStatus.yvelocity < landerProperties.landingSpeed
 def moveLander(landerStatus,landerImg, canvas, throttle, infoLabel):
     global landerControls
@@ -161,29 +188,35 @@ def moveLander(landerStatus,landerImg, canvas, throttle, infoLabel):
     while True:
         oldAngle = landerStatus.angle
         time.sleep(.05)
-        landerControls.lock.acquire()
-        throttle['value']=landerControls.thrust*100
-        landerControls.lock.release()
+        acquired = landerControls.lock.acquire(timeout=0.1)
+        if acquired:
+            throttle['value']=landerControls.thrust*100
+            landerControls.lock.release()
         oldTime=readTime
         readTime=time.time()
         timeDelta=readTime-oldTime
         physicsSim.updateLanderStatusDueToPhysics(landerProperties, landerStatus, timeDelta)
         physicsSim.updateLanderStatusDueToControls(landerProperties, landerStatus, landerControls, timeDelta)
-
-        infoString = 'Vertical Speed: {0: .2f} Fuel: {1: .2f} Altitude: {2: .2f} '.format(landerStatus.yvelocity, landerStatus.fuelmass, ((canvasHeight-landerHeight)-landerStatus.yposition/pixelsPerMeter)*pixelsPerMeter)
+        landerStatus.altitude=((canvasHeight-landerHeight)-(landerStatus.yposition*pixelsPerMeter))/pixelsPerMeter
+        infoString = 'Vertical Speed: {0: .2f} | Horizontal Speed: {1: .2f}| Fuel: {2: .2f} |  Altitude: {3: .2f} '.format(landerStatus.yvelocity, landerStatus.xvelocity, landerStatus.fuelmass, landerStatus.altitude)
         #print("move lander: "+str(landerStatus.xposition))
         infoLabel.config(text=infoString)
         if not (checkLanderInBounds(landerStatus) and checkFuel(landerStatus)):
-            if checkSafeLanding(landerStatus, landerProperties):
-                print('safe landing')
-                infoLabel.config(text=infoString + " => safe landing")
+            if not checkFuel(landerStatus):
+                print('ran out of fuel')
+                infoLabel.config(text=infoString + " => ran out of fuel")
                 time.sleep(5)
             else:
-                print('unsafe landing')
-                infoLabel.config(text=infoString+" => unsafe landing")
-                time.sleep(5)
+                if checkSafeLanding(landerStatus, landerProperties):
+                    print('safe landing')
+                    infoLabel.config(text=infoString + " => safe landing")
+                    time.sleep(5)
+                else:
+                    print('unsafe landing')
+                    infoLabel.config(text=infoString+" => crash/out of bounds")
+                    time.sleep(5)
             print(landerStatus.yvelocity)
-            landerStatus.reset(0)
+            landerStatus.reset()
             readTime=time.time()
 
             #landerStatus.angle=oldAngle+10
