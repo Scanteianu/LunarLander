@@ -95,6 +95,7 @@ def throttleUp(event):
     global landerControls
     acquired = landerControls.lock.acquire(timeout=0.1)
     if acquired:
+        #throttlable between 10 and 60% of power
         if landerControls.thrust <0.6:
             landerControls.thrust+=0.05
         if landerControls.thrust > 0.6:
